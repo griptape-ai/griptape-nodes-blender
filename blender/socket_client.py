@@ -257,14 +257,27 @@ try:
                     # Restore original context
                     current_window.scene = original_scene_ctx
 
+                    # Cleanup: remove duplicated camera object and its data, then remove temp scene
+                    try:
+                        if cam_copy.name in bpy.data.objects:
+                            bpy.data.objects.remove(cam_copy, do_unlink=True)
+                        if cam_copy.data and cam_copy.data.users == 0:
+                            if cam_copy.data.name in bpy.data.cameras:
+                                bpy.data.cameras.remove(cam_copy.data, do_unlink=True)
+                    except Exception as cleanup_obj_err:
+                        print(f"DEBUG SAFE: Warning removing temp camera object: {{cleanup_obj_err}}")
+
+                    try:
+                        bpy.data.scenes.remove(temp_scene, do_unlink=True)
+                    except Exception as cleanup_scene_err:
+                        print(f"DEBUG SAFE: Warning removing temp scene: {{cleanup_scene_err}}")
+
                     # The OpenGL render writes to temp_scene.render.filepath; ensure it's saved
                     ogl_path = temp_scene.render.filepath if temp_scene.render.filepath else temp_file
                     # Move/symlink to our expected temp_file name
                     if os.path.exists(ogl_path):
                         os.rename(ogl_path, temp_file)
 
-                    # Cleanup temp scene
-                    bpy.data.scenes.remove(temp_scene, do_unlink=True)
                 else:
                     bpy.ops.render.render(write_still=True)
 
