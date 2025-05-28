@@ -215,11 +215,11 @@ The server automatically handles render engine issues:
 
 ## Benefits vs MCP Approach
 
-✅ **No async context issues** - Simple socket connections  
-✅ **Persistent server** - Runs inside Blender, stays responsive
-✅ **Easy debugging** - Clear JSON communication
-✅ **No complex dependencies** - Just Python sockets
-✅ **Better performance** - Direct bpy access, no process spawning
+- ✅ **No async context issues** - Simple socket connections  
+- ✅ **Persistent server** - Runs inside Blender, stays responsive
+- ✅ **Easy debugging** - Clear JSON communication
+- ✅ **No complex dependencies** - Just Python sockets
+- ✅ **Better performance** - Direct bpy access, no process spawning
 
 ## Troubleshooting
 
