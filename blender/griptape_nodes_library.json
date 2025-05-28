@@ -1,0 +1,72 @@
+{
+    "name": "Blender Library",
+    "library_schema_version": "0.1.0",
+    "settings": [
+        {
+            "description": "Configuration for Blender MCP server connection",
+            "category": "nodes.Blender",
+            "contents": {
+                "BLENDER_MCP_HOST": "localhost",
+                "BLENDER_MCP_PORT": "8080"
+            }
+        }
+    ],
+    "metadata": {
+        "author": "Griptape",
+        "description": "Griptape Nodes for interacting with Blender via MCP server for real-time camera capture and scene interaction.",
+        "library_version": "0.1.0",
+        "engine_version": "0.1.0",
+        "tags": [
+            "Griptape",
+            "Blender",
+            "3D",
+            "Camera",
+            "Real-time",
+            "MCP"
+        ],
+        "dependencies": {
+            "pip_dependencies": [
+                "requests"
+            ]
+        }
+    },
+    "categories": [
+        {
+            "Blender": {
+                "color": "border-orange-500",
+                "title": "Blender",
+                "description": "Nodes for real-time interaction with Blender scenes via MCP server.",
+                "icon": "Camera"
+            }
+        }
+    ],
+    "nodes": [
+        {
+            "class_name": "BlenderCameraCapture",
+            "file_path": "camera_capture.py",
+            "metadata": {
+                "category": "Blender",
+                "description": "Captures a single frame from a Blender camera with configurable output format and resolution.",
+                "display_name": "Blender Camera Capture"
+            }
+        },
+        {
+            "class_name": "BlenderCameraStream",
+            "file_path": "camera_stream.py",
+            "metadata": {
+                "category": "Blender",
+                "description": "Provides real-time streaming from a Blender camera with configurable frame rate and format.",
+                "display_name": "Blender Camera Stream"
+            }
+        },
+        {
+            "class_name": "BlenderCameraList",
+            "file_path": "camera_list.py",
+            "metadata": {
+                "category": "Blender",
+                "description": "Lists all available cameras in the current Blender scene.",
+                "display_name": "Blender Camera List"
+            }
+        }
+    ]
+}
