@@ -146,7 +146,21 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     if scene.render.engine == 'CYCLES':
                         scene.cycles.device = 'CPU'
                         print("Forced CPU rendering for stability")
-                    elif scene.render.engine not in ['WORKBENCH', 'EEVEE']:
+                    elif scene.render.engine == 'BLENDER_EEVEE_NEXT':
+                        # Handle new Eevee Next engine in Blender 4.4+
+                        print("Using Eevee Next engine - applying optimizations")
+                        # Optimize Eevee Next settings for stability
+                        if hasattr(scene.eevee, 'taa_render_samples'):
+                            scene.eevee.taa_render_samples = 8
+                        if hasattr(scene.eevee, 'use_motion_blur'):
+                            scene.eevee.use_motion_blur = False
+                        if hasattr(scene.eevee, 'use_bloom'):
+                            scene.eevee.use_bloom = False
+                        if hasattr(scene.eevee, 'use_ssr'):
+                            scene.eevee.use_ssr = False
+                        if hasattr(scene.eevee, 'use_volumetric_lights'):
+                            scene.eevee.use_volumetric_lights = False
+                    elif scene.render.engine not in ['WORKBENCH', 'EEVEE', 'BLENDER_EEVEE']:
                         # Switch to Workbench for fastest, most stable rendering
                         scene.render.engine = 'WORKBENCH'
                         print("Switched to Workbench engine for stability")
@@ -194,10 +208,16 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     
                     # Render with maximum error protection
                     try:
+                        print(f"About to render with engine: {scene.render.engine}")
                         bpy.ops.render.render(write_still=False)
+                        print("Render operation completed")
                     except Exception as render_error:
-                        print(f"Render operation failed: {render_error}")
-                        self.send_error(500, f"Render failed: {str(render_error)}")
+                        error_details = f"Render operation failed: {render_error}"
+                        print(error_details)
+                        print(f"Engine: {scene.render.engine}, Resolution: {width}x{height}")
+                        import traceback
+                        traceback.print_exc()
+                        self.send_error(500, error_details)
                         return
                     
                     # Get and validate image data

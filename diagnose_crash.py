@@ -202,10 +202,14 @@ def get_blender_info():
                 print("  Recommendation: Switch to Workbench or Eevee")
             elif engine == 'EEVEE':
                 print("\n✓ Using Eevee render engine (good for real-time)")
+            elif engine == 'BLENDER_EEVEE_NEXT':
+                print("\n✓ Using Eevee Next render engine (Blender 4.4+)")
+                print("  This is the new Eevee engine - should work well for real-time")
             elif engine == 'WORKBENCH':
                 print("\n✓ Using Workbench render engine (most stable)")
             else:
                 print(f"\n? Unknown render engine: {engine}")
+                print("  This may cause compatibility issues with the MCP server")
             
         else:
             print("Cannot get Blender configuration")
