@@ -17,16 +17,16 @@ This package provides Griptape nodes for capturing camera views from Blender sce
 
 ## Features
 
-✅ **Simple socket communication** - No complex async context issues
-✅ **Runs inside Blender** - Direct access to bpy API and scene data  
-✅ **Real-time camera capture** - Render images from any camera in scene
-✅ **Comprehensive camera metadata** - Focal length, sensor info, DOF, transforms
-✅ **Dynamic UI updates** - Camera dropdowns and metadata labels update automatically
-✅ **Flow control support** - Both nodes integrate seamlessly into control workflows
-✅ **Always fresh data** - Camera List Node re-evaluates on every workflow run
-✅ **Automatic engine handling** - Fixes Eevee Next and GPU issues automatically
-✅ **No external dependencies** - Just Python standard library
-✅ **Easy setup** - Copy/paste script into Blender
+- ✅ **Simple socket communication** - No complex async context issues
+- ✅ **Runs inside Blender** - Direct access to bpy API and scene data  
+- ✅ **Real-time camera capture** - Render images from any camera in scene
+- ✅ **Comprehensive camera metadata** - Focal length, sensor info, DOF, transforms
+- ✅ **Dynamic UI updates** - Camera dropdowns and metadata labels update automatically
+- ✅ **Flow control support** - Both nodes integrate seamlessly into control workflows
+- ✅ **Always fresh data** - Camera List Node re-evaluates on every workflow run
+- ✅ **Automatic engine handling** - Fixes Eevee Next and GPU issues automatically
+- ✅ **No external dependencies** - Just Python standard library
+- ✅ **Easy setup** - Copy/paste script into Blender
 
 ## Files
 
