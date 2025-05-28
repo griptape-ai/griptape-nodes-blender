@@ -75,66 +75,153 @@ class BlenderCameraList(ControlNode):
     def _fetch_cameras(self) -> tuple[List[Dict], str]:
         """Fetch comprehensive camera information from Blender socket server."""
         try:
-            # Use execute_code to get detailed camera information
+            # Use execute_code to get detailed camera information with safety measures
             camera_info_code = """
 import bpy
 import json
 
-cameras = []
-scene = bpy.context.scene
+try:
+    cameras = []
+    scene = bpy.context.scene
+    
+    # Get active camera safely first (without dependency graph stress)
+    active_camera_name = None
+    try:
+        if scene.camera:
+            active_camera_name = scene.camera.name
+    except:
+        pass  # Ignore active camera detection errors
+    
+    camera_objects = [obj for obj in bpy.data.objects if obj.type == 'CAMERA']
+    
+    # If too many cameras, use simplified data collection
+    if len(camera_objects) > 20:
+        print(f"DEBUG: Large scene detected ({len(camera_objects)} cameras), using simplified collection")
+        for obj in camera_objects:
+            try:
+                camera_data = obj.data
+                camera_info = {
+                    "name": obj.name,
+                    "location": list(obj.location),
+                    "rotation": list(obj.rotation_euler),
+                    "active": obj.name == active_camera_name,
+                    "focal_length": camera_data.lens,
+                    "sensor_width": camera_data.sensor_width,
+                    "sensor_height": camera_data.sensor_height,
+                    "sensor_fit": camera_data.sensor_fit,
+                    "type": camera_data.type,
+                    "data_format": "simplified"
+                }
+                cameras.append(camera_info)
+            except Exception as e:
+                print(f"DEBUG: Error collecting data for camera {obj.name}: {e}")
+                # Add minimal data if there's an error
+                cameras.append({
+                    "name": obj.name,
+                    "location": [0, 0, 0],
+                    "rotation": [0, 0, 0],
+                    "active": False,
+                    "data_format": "minimal_error"
+                })
+    else:
+        # Full data collection for smaller scenes
+        for obj in camera_objects:
+            try:
+                camera_data = obj.data
+                
+                # Basic transform data (safe)
+                camera_info = {
+                    "name": obj.name,
+                    "location": list(obj.location),
+                    "rotation": list(obj.rotation_euler),
+                    "scale": list(obj.scale),
+                    "active": obj.name == active_camera_name,
+                    
+                    # Camera-specific properties (safe)
+                    "focal_length": camera_data.lens,
+                    "sensor_width": camera_data.sensor_width,
+                    "sensor_height": camera_data.sensor_height,
+                    "sensor_fit": camera_data.sensor_fit,
+                    
+                    # Clipping and depth (safe)
+                    "clip_start": camera_data.clip_start,
+                    "clip_end": camera_data.clip_end,
+                    
+                    # Camera type and angle (safe)
+                    "type": camera_data.type,
+                    
+                    # Shift (safe)
+                    "shift_x": camera_data.shift_x,
+                    "shift_y": camera_data.shift_y,
+                    "passepartout_alpha": camera_data.passepartout_alpha,
+                    
+                    "data_format": "enhanced"
+                }
+                
+                # Add optional properties with individual error handling
+                try:
+                    camera_info["angle"] = camera_data.angle if hasattr(camera_data, 'angle') else None
+                    camera_info["angle_x"] = camera_data.angle_x if hasattr(camera_data, 'angle_x') else None
+                    camera_info["angle_y"] = camera_data.angle_y if hasattr(camera_data, 'angle_y') else None
+                except:
+                    pass
+                
+                # Depth of field (with error handling)
+                try:
+                    if hasattr(camera_data, 'dof'):
+                        camera_info["dof_use"] = camera_data.dof.use_dof
+                        camera_info["dof_focus_distance"] = camera_data.dof.focus_distance
+                        camera_info["dof_aperture_fstop"] = camera_data.dof.aperture_fstop
+                    else:
+                        camera_info["dof_use"] = False
+                        camera_info["dof_focus_distance"] = None
+                        camera_info["dof_aperture_fstop"] = None
+                except:
+                    camera_info["dof_use"] = False
+                    camera_info["dof_focus_distance"] = None
+                    camera_info["dof_aperture_fstop"] = None
+                
+                # Background images (with error handling)
+                try:
+                    camera_info["background_images_count"] = len(camera_data.background_images) if hasattr(camera_data, 'background_images') else 0
+                except:
+                    camera_info["background_images_count"] = 0
+                
+                # Matrix world (potentially dependency-sensitive, with error handling)
+                try:
+                    matrix_world = obj.matrix_world
+                    camera_info["matrix_world"] = [list(row) for row in matrix_world]
+                except Exception as e:
+                    print(f"DEBUG: Skipping matrix_world for {obj.name} due to error: {e}")
+                    camera_info["matrix_world"] = None
+                    
+                cameras.append(camera_info)
+                
+            except Exception as e:
+                print(f"DEBUG: Error collecting full data for camera {obj.name}: {e}")
+                # Add minimal data if there's an error
+                try:
+                    cameras.append({
+                        "name": obj.name,
+                        "location": list(obj.location),
+                        "rotation": list(obj.rotation_euler),
+                        "active": obj.name == active_camera_name,
+                        "data_format": "fallback_error"
+                    })
+                except:
+                    cameras.append({
+                        "name": obj.name,
+                        "location": [0, 0, 0],
+                        "rotation": [0, 0, 0],
+                        "active": False,
+                        "data_format": "minimal_error"
+                    })
 
-for obj in bpy.data.objects:
-    if obj.type == 'CAMERA':
-        camera_data = obj.data
-        
-        # Basic transform data
-        camera_info = {
-            "name": obj.name,
-            "location": list(obj.location),
-            "rotation": list(obj.rotation_euler),
-            "scale": list(obj.scale),
-            "active": scene.camera == obj if scene.camera else False,
-            
-            # Camera-specific properties
-            "focal_length": camera_data.lens,
-            "sensor_width": camera_data.sensor_width,
-            "sensor_height": camera_data.sensor_height,
-            "sensor_fit": camera_data.sensor_fit,
-            
-            # Clipping and depth
-            "clip_start": camera_data.clip_start,
-            "clip_end": camera_data.clip_end,
-            
-            # Camera type and angle
-            "type": camera_data.type,
-            "angle": camera_data.angle if hasattr(camera_data, 'angle') else None,
-            "angle_x": camera_data.angle_x if hasattr(camera_data, 'angle_x') else None,
-            "angle_y": camera_data.angle_y if hasattr(camera_data, 'angle_y') else None,
-            
-            # Depth of field
-            "dof_use": camera_data.dof.use_dof if hasattr(camera_data, 'dof') else False,
-            "dof_focus_distance": camera_data.dof.focus_distance if hasattr(camera_data, 'dof') else None,
-            "dof_aperture_fstop": camera_data.dof.aperture_fstop if hasattr(camera_data, 'dof') else None,
-            
-            # Shift and passepartout
-            "shift_x": camera_data.shift_x,
-            "shift_y": camera_data.shift_y,
-            "passepartout_alpha": camera_data.passepartout_alpha,
-            
-            # Background images (if any)
-            "background_images_count": len(camera_data.background_images) if hasattr(camera_data, 'background_images') else 0,
-        }
-        
-        # Add camera matrix information
-        try:
-            matrix_world = obj.matrix_world
-            camera_info["matrix_world"] = [list(row) for row in matrix_world]
-        except:
-            camera_info["matrix_world"] = None
-            
-        cameras.append(camera_info)
-
-result = {"success": True, "cameras": cameras}
+    result = {"success": True, "cameras": cameras}
+    
+except Exception as e:
+    print(f"DEBUG: Major error in camera collection: {e}")
+    result = {"success": False, "error": str(e)}
 """
             
             result = self._execute_camera_code(camera_info_code)
@@ -144,7 +231,14 @@ result = {"success": True, "cameras": cameras}
                 if "result" in result and result["result"].get("success"):
                     cameras = result["result"].get("cameras", [])
                     if cameras:
-                        status = f"Successfully found {len(cameras)} camera(s) with detailed information"
+                        # Check data format to provide appropriate status
+                        data_formats = set(cam.get("data_format", "unknown") for cam in cameras)
+                        if "simplified" in data_formats:
+                            status = f"Successfully found {len(cameras)} camera(s) - used simplified collection for large scene"
+                        elif "enhanced" in data_formats:
+                            status = f"Successfully found {len(cameras)} camera(s) with detailed information"
+                        else:
+                            status = f"Successfully found {len(cameras)} camera(s) with basic information"
                         return cameras, status
                     else:
                         status = "No cameras found in the current Blender scene"
@@ -162,10 +256,15 @@ result = {"success": True, "cameras": cameras}
             return self._fetch_cameras_simple()
 
     def _execute_camera_code(self, code: str) -> Dict[str, Any]:
-        """Execute Python code in Blender to get camera information."""
+        """Execute Python code in Blender to get camera information with safety timeout."""
         from socket_client import BlenderSocketClient
-        client = BlenderSocketClient()
-        return client.execute_code(code)
+        try:
+            # Use a shorter timeout for camera operations to prevent hanging
+            # on complex scenes that might cause dependency graph issues
+            client = BlenderSocketClient(timeout=30)  # 30 second timeout instead of default 60
+            return client.execute_code(code)
+        except Exception as e:
+            return {"success": False, "error": f"Camera code execution failed: {str(e)}"}
 
     def _fetch_cameras_simple(self) -> tuple[List[Dict], str]:
         """Fallback method using the simple list_cameras command."""
@@ -320,6 +419,15 @@ result = {"success": True, "cameras": cameras}
                 
                 # Create detailed camera list artifact
                 self.parameter_output_values["cameras_output"] = ListArtifact(camera_artifacts, name="blender_cameras")
+
+                # Propagate camera names to all BlenderCameraCapture nodes to refresh their dropdowns
+                try:
+                    from camera_capture import BlenderCameraCapture
+                    camera_names = [cam["name"] for cam in formatted_cameras]
+                    BlenderCameraCapture._update_all_camera_lists_with_names(camera_names)
+                except Exception as e:
+                    # Non-fatal if capture class isn't loaded yet
+                    logger.debug(f"Camera list propagation skipped: {e}")
             
             else:
                 # No cameras found or error occurred

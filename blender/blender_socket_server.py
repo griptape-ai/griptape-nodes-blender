@@ -274,26 +274,47 @@ class BlenderSocketServer:
             return {"success": False, "error": str(e)}
     
     def _execute_code(self, code: str):
-        """Execute arbitrary Python code in Blender (like the reference project)"""
+        """Execute arbitrary Python code in Blender with safety measures"""
         try:
+            # Add safety measures for large/complex scenes
+            import gc
+            
             # Create a safe namespace
             namespace = {
                 'bpy': bpy,
                 'result': None
             }
             
-            # Execute the code
-            exec(code, namespace)
-            
-            # Return the result
-            result = namespace.get('result')
-            if result is not None:
-                return {"success": True, "result": result}
-            else:
-                return {"success": True, "message": "Code executed successfully"}
+            try:
+                # Execute the code with additional error catching
+                exec(code, namespace)
+                
+                # Force garbage collection to help with memory issues in large scenes
+                gc.collect()
+                
+                # Return the result
+                result = namespace.get('result')
+                if result is not None:
+                    return {"success": True, "result": result}
+                else:
+                    return {"success": True, "message": "Code executed successfully"}
+                    
+            except MemoryError:
+                gc.collect()  # Try to free memory
+                return {"success": False, "error": "Out of memory - scene too complex for this operation"}
+            except RecursionError:
+                return {"success": False, "error": "Operation too complex - recursion limit exceeded"}
+            except Exception as e:
+                error_msg = str(e)
+                # Check for dependency graph related errors
+                if "dependency" in error_msg.lower() or "depsgraph" in error_msg.lower():
+                    return {"success": False, "error": f"Scene dependency error: {error_msg}. Try with a simpler scene."}
+                else:
+                    return {"success": False, "error": f"Code execution failed: {error_msg}"}
                 
         except Exception as e:
-            return {"success": False, "error": f"Code execution failed: {str(e)}"}
+            # Ultimate fallback
+            return {"success": False, "error": f"Code execution failed with system error: {str(e)}"}
 
     # Note: Complex operations like rendering should be done via execute_code
     # following the reference project pattern of keeping the server minimal

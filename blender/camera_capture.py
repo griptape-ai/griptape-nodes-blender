@@ -267,6 +267,33 @@ class BlenderCameraCapture(ControlNode):
         is_connected, message = self._check_blender_connection()
         if not is_connected:
             return [ConnectionError(message)]
+        
+        # Validate camera selection if cameras_input is connected
+        cameras_input = self.get_parameter_value("cameras_input")
+        if cameras_input and hasattr(cameras_input, 'value'):
+            current_camera = self.get_parameter_value("camera_name")
+            available_cameras = []
+            
+            for item in cameras_input.value:
+                if hasattr(item, 'value'):
+                    try:
+                        camera_data = json.loads(item.value)
+                        if 'name' in camera_data:
+                            available_cameras.append(camera_data['name'])
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+            
+            if available_cameras and current_camera not in available_cameras:
+                # Update choices first, then auto-correct to first available camera
+                camera_param = self.get_parameter_by_name("camera_name")
+                if camera_param:
+                    self._update_camera_choices(camera_param, available_cameras)
+                    # Set the value directly to bypass validation
+                    camera_param.default_value = available_cameras[0]
+                    if hasattr(camera_param, 'value'):
+                        camera_param.value = available_cameras[0]
+                    self.parameter_values["camera_name"] = available_cameras[0]
+        
         return None
 
     def process(self):
@@ -305,13 +332,22 @@ class BlenderCameraCapture(ControlNode):
             self.parameter_output_values["status_output"] = f"Capturing frame from camera '{camera_name}'..."
 
             # Call socket server to render camera
-            result = render_camera(
-                camera_name=camera_name,
-                width=resolution_x,
-                height=resolution_y,
-                format_type=output_format.upper(),
-                quality=quality
-            )
+            try:
+                # Use shorter timeout for large scenes to prevent dependency graph crashes
+                from socket_client import BlenderSocketClient
+                client = BlenderSocketClient(timeout=90)  # 90 second timeout for rendering
+                result = client.render_camera(
+                    camera_name=camera_name,
+                    width=resolution_x,
+                    height=resolution_y,
+                    format_type=output_format.upper(),
+                    quality=quality
+                )
+            except Exception as e:
+                error_msg = f"Render operation failed or timed out: {str(e)}"
+                self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown error from Blender socket server")
@@ -409,22 +445,44 @@ class BlenderCameraCapture(ControlNode):
                         # Update current instance camera parameter choices
                         camera_param = self.get_parameter_by_name("camera_name")
                         if camera_param:
+                            # First update the choices
                             success = self._update_camera_choices(camera_param, camera_names)
                             if success:
+                                # Now check if current selection is still valid and update if needed
+                                current_camera = self.get_parameter_value("camera_name")
+                                if current_camera not in camera_names:
+                                    # Current selection is invalid, switch to first available camera
+                                    # Use direct parameter value setting to bypass validation temporarily
+                                    camera_param.default_value = camera_names[0]
+                                    if hasattr(camera_param, 'value'):
+                                        camera_param.value = camera_names[0]
+                                    self.parameter_values["camera_name"] = camera_names[0]
+                                    modified_parameters_set.add("camera_name")
+                                
                                 # Include the parameter in modified_parameters_set to trigger UI update
                                 modified_parameters_set.add("camera_name")
                             
                             # Note: Not updating all other instances here to prevent feedback loops
                             # Other instances will get updated when their own cameras_input changes
                         
-                        # Update camera metadata display
-                        self._update_camera_metadata_display(modified_parameters_set)
+                        # Update camera metadata display after camera list is updated
+                        try:
+                            self._update_camera_metadata_display(modified_parameters_set)
+                        except Exception as metadata_error:
+                            # Don't let metadata errors break the camera list update
+                            pass
+                            
             except Exception as e:
-                import traceback
-                traceback.print_exc()
+                # Don't let processing errors break the node
+                pass
+                
         elif parameter.name == "camera_name":
             # Update metadata display when camera selection changes
-            self._update_camera_metadata_display(modified_parameters_set)
+            try:
+                self._update_camera_metadata_display(modified_parameters_set)
+            except Exception as metadata_error:
+                # Don't let metadata errors break camera selection
+                pass
 
     def _update_camera_choices(self, camera_param, camera_names):
         """Helper method to update camera choices for a parameter."""
@@ -433,20 +491,22 @@ class BlenderCameraCapture(ControlNode):
             options_trait = None
             trait_found = False
             
+            # Check multiple possible trait storage locations
+            trait_collections = []
             if hasattr(camera_param, 'traits') and camera_param.traits:
-                for i, trait in enumerate(camera_param.traits):
+                trait_collections.append(camera_param.traits)
+            if hasattr(camera_param, '_traits') and camera_param._traits:
+                trait_collections.append(camera_param._traits)
+            
+            # Look for Options trait in all collections
+            for traits_collection in trait_collections:
+                for trait in traits_collection:
                     if hasattr(trait, 'choices'):
-                        old_choices = trait.choices
                         trait.choices = camera_names
                         trait_found = True
                         break
-            elif hasattr(camera_param, '_traits') and camera_param._traits:
-                for i, trait in enumerate(camera_param._traits):
-                    if hasattr(trait, 'choices'):
-                        old_choices = trait.choices
-                        trait.choices = camera_names
-                        trait_found = True
-                        break
+                if trait_found:
+                    break
             
             # If no traits found, try to create and add one
             if not trait_found:
@@ -470,10 +530,12 @@ class BlenderCameraCapture(ControlNode):
                         trait_found = True
                         
                 except Exception as e:
+                    # If we can't create/add traits, that's ok - we'll work without validation
                     pass
             
             return trait_found
         except Exception as e:
+            # Return False if update failed, but don't crash
             return False
 
     @classmethod
@@ -531,7 +593,7 @@ class BlenderCameraCapture(ControlNode):
             sensor_text = f"{sensor_w}×{sensor_h}mm, {sensor_fit}, {cam_type}"
             self.set_parameter_value("sensor_info_label", sensor_text)
             
-            # Depth of field label
+            # Depth of field label - fix structure mismatch
             dof = camera_data.get('depth_of_field', {})
             if dof.get('enabled'):
                 focus_dist = dof.get('focus_distance', 10.0)
@@ -548,6 +610,27 @@ class BlenderCameraCapture(ControlNode):
             rot_text = f"({rotation.get('x', 0.0):.2f}, {rotation.get('y', 0.0):.2f}, {rotation.get('z', 0.0):.2f})"
             transform_text = f"Loc: {loc_text} Rot: {rot_text}"
             self.set_parameter_value("transform_info_label", transform_text)
+            
+        elif camera_data:
+            # Basic camera data available - show what we can
+            status_text = "✓ Active Scene Camera" if camera_data.get('active') else "Available Camera"
+            self.set_parameter_value("camera_status_label", status_text)
+            
+            # Show basic location/rotation if available
+            location = camera_data.get('location', {})
+            rotation = camera_data.get('rotation', {})
+            if location and rotation:
+                loc_text = f"({location.get('x', 0.0):.2f}, {location.get('y', 0.0):.2f}, {location.get('z', 0.0):.2f})"
+                rot_text = f"({rotation.get('x', 0.0):.2f}, {rotation.get('y', 0.0):.2f}, {rotation.get('z', 0.0):.2f})"
+                transform_text = f"Loc: {loc_text} Rot: {rot_text}"
+                self.set_parameter_value("transform_info_label", transform_text)
+            else:
+                self.set_parameter_value("transform_info_label", "Basic data only")
+                
+            # Set others to indicate limited data
+            self.set_parameter_value("focal_length_label", "Basic mode")
+            self.set_parameter_value("sensor_info_label", "Basic mode")
+            self.set_parameter_value("dof_info_label", "Basic mode")
             
         else:
             # No enhanced data - show placeholder values
