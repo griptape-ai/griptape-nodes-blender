@@ -46,21 +46,17 @@ You need to run a simple HTTP server inside Blender to expose the camera API.
 
 ```python
 import bpy
-import bmesh
-import mathutils
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
-import threading
-import io
-import base64
 import time
+import threading
 import gc
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 class BlenderCameraHandler(BaseHTTPRequestHandler):
-    # Class-level rate limiting
+    # Class-level rate limiting with longer intervals for stability
     last_render_time = 0
-    min_render_interval = 0.1  # Minimum 100ms between renders
+    min_render_interval = 0.5  # Increased to 500ms between renders for stability
     
     def do_GET(self):
         parsed_path = urlparse(self.path)
@@ -95,7 +91,7 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(response).encode())
                 
             elif path.startswith('/api/camera/') and path.endswith('/render'):
-                # Rate limiting to prevent GPU overload
+                # Enhanced rate limiting to prevent GPU overload
                 current_time = time.time()
                 if current_time - BlenderCameraHandler.last_render_time < BlenderCameraHandler.min_render_interval:
                     self.send_error(429, "Rate limited: Too many render requests")
@@ -111,64 +107,106 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     return
                 
                 # Get parameters with safer defaults
-                width = min(int(params.get('width', [1280])[0]), 2560)  # Cap resolution
-                height = min(int(params.get('height', [720])[0]), 1440)  # Cap resolution
+                width = min(int(params.get('width', [1280])[0]), 1920)  # Reduced max resolution
+                height = min(int(params.get('height', [720])[0]), 1080)  # Reduced max resolution
                 format_type = params.get('format', ['jpeg'])[0].lower()  # Default to JPEG for speed
                 quality = max(10, min(int(params.get('quality', [75])[0]), 100))  # Clamp quality
                 
-                # Set render settings
+                # Set render settings with enhanced cleanup
                 scene = bpy.context.scene
                 original_camera = scene.camera
                 original_res_x = scene.render.resolution_x
                 original_res_y = scene.render.resolution_y
                 original_format = scene.render.image_settings.file_format
                 original_quality = scene.render.image_settings.quality
+                original_percentage = scene.render.resolution_percentage
                 
                 try:
+                    # Clear any existing render results first
+                    if 'Render Result' in bpy.data.images:
+                        bpy.data.images.remove(bpy.data.images['Render Result'])
+                    
+                    # Force scene update and invalidate caches
+                    bpy.context.view_layer.update()
+                    scene.frame_set(scene.frame_current)  # Force scene refresh
+                    
+                    # Set camera and render settings
                     scene.camera = camera_obj
                     scene.render.resolution_x = width
                     scene.render.resolution_y = height
                     scene.render.resolution_percentage = 100
                     
-                    # Use GPU-friendly settings
+                    # Use GPU-friendly settings with enhanced stability
                     if format_type == 'png':
                         scene.render.image_settings.file_format = 'PNG'
                         scene.render.image_settings.compression = 50  # Faster compression
+                        scene.render.image_settings.color_mode = 'RGB'  # Avoid alpha for stability
                     elif format_type == 'jpeg':
                         scene.render.image_settings.file_format = 'JPEG'
                         scene.render.image_settings.quality = quality
+                        scene.render.image_settings.color_mode = 'RGB'
                     elif format_type == 'exr':
                         scene.render.image_settings.file_format = 'OPEN_EXR'
+                        scene.render.image_settings.color_mode = 'RGB'
                     elif format_type == 'tiff':
                         scene.render.image_settings.file_format = 'TIFF'
+                        scene.render.image_settings.color_mode = 'RGB'
                     
-                    # Force viewport update before render
+                    # Additional stability settings
+                    scene.render.use_persistent_data = False  # Disable persistent data to free memory
+                    
+                    # Force complete scene update before render
                     bpy.context.view_layer.update()
+                    bpy.context.evaluated_depsgraph_get().update()
                     
-                    # Render with error handling
-                    bpy.ops.render.render(write_still=False)
+                    # Add small delay before render to allow GPU to stabilize
+                    time.sleep(0.1)
                     
-                    # Get image data
-                    image = bpy.data.images.get('Render Result')
-                    if not image:
-                        self.send_error(500, "Render failed - no result image")
+                    # Render with enhanced error handling
+                    try:
+                        bpy.ops.render.render(write_still=False)
+                    except Exception as render_error:
+                        print(f"Render operation failed: {render_error}")
+                        self.send_error(500, f"Render failed: {str(render_error)}")
                         return
                     
-                    # Save to memory with error handling
-                    temp_path = f"/tmp/blender_render_{threading.current_thread().ident}.{format_type}"
-                    image.save_render(temp_path)
+                    # Get image data with validation
+                    image = bpy.data.images.get('Render Result')
+                    if not image or not image.pixels:
+                        self.send_error(500, "Render failed - no result image or empty pixels")
+                        return
                     
-                    # Read and send
-                    with open(temp_path, 'rb') as f:
-                        image_data = f.read()
+                    # Save to memory with enhanced error handling
+                    temp_path = f"/tmp/blender_render_{threading.current_thread().ident}_{int(time.time())}.{format_type}"
+                    try:
+                        image.save_render(temp_path)
+                    except Exception as save_error:
+                        print(f"Failed to save render: {save_error}")
+                        self.send_error(500, f"Failed to save render: {str(save_error)}")
+                        return
                     
-                    # Clean up temp file
+                    # Read and send with validation
+                    try:
+                        with open(temp_path, 'rb') as f:
+                            image_data = f.read()
+                        
+                        if not image_data:
+                            self.send_error(500, "Rendered image file is empty")
+                            return
+                            
+                    except Exception as read_error:
+                        print(f"Failed to read rendered image: {read_error}")
+                        self.send_error(500, f"Failed to read rendered image: {str(read_error)}")
+                        return
+                    
+                    # Clean up temp file immediately
                     import os
                     try:
                         os.remove(temp_path)
-                    except:
-                        pass
+                    except Exception as cleanup_error:
+                        print(f"Warning: Failed to clean up temp file: {cleanup_error}")
                     
+                    # Send successful response
                     self.send_response(200)
                     self.send_header('Content-type', f'image/{format_type}')
                     self.send_header('Content-length', str(len(image_data)))
@@ -176,27 +214,49 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     self.wfile.write(image_data)
                     
                 finally:
-                    # Always restore original settings
-                    scene.camera = original_camera
-                    scene.render.resolution_x = original_res_x
-                    scene.render.resolution_y = original_res_y
-                    scene.render.image_settings.file_format = original_format
-                    scene.render.image_settings.quality = original_quality
-                    
-                    # Force garbage collection to free GPU memory
-                    gc.collect()
+                    # Enhanced cleanup - always restore original settings
+                    try:
+                        scene.camera = original_camera
+                        scene.render.resolution_x = original_res_x
+                        scene.render.resolution_y = original_res_y
+                        scene.render.resolution_percentage = original_percentage
+                        scene.render.image_settings.file_format = original_format
+                        scene.render.image_settings.quality = original_quality
+                        
+                        # Clear render result to free GPU memory
+                        if 'Render Result' in bpy.data.images:
+                            bpy.data.images.remove(bpy.data.images['Render Result'])
+                        
+                        # Force scene update to apply changes
+                        bpy.context.view_layer.update()
+                        
+                        # Enhanced garbage collection for GPU memory
+                        gc.collect()
+                        
+                        # Additional GPU memory cleanup (if available)
+                        try:
+                            import bgl
+                            bgl.glFinish()  # Wait for GPU operations to complete
+                        except:
+                            pass  # bgl might not be available in all Blender builds
+                            
+                    except Exception as cleanup_error:
+                        print(f"Warning: Cleanup failed: {cleanup_error}")
                 
             else:
                 self.send_error(404, "Endpoint not found")
                 
         except Exception as e:
             print(f"Blender server error: {e}")
+            import traceback
+            traceback.print_exc()
             self.send_error(500, str(e))
 
 def start_server():
     server = HTTPServer(('localhost', 8080), BlenderCameraHandler)
     print("Blender Camera Server started on http://localhost:8080")
-    print("GPU-safe rendering enabled with rate limiting")
+    print("Enhanced GPU-safe rendering enabled with improved stability")
+    print("Rate limiting: 500ms minimum between renders")
     server.serve_forever()
 
 # Start server in background thread
@@ -276,6 +336,56 @@ Lists all available cameras in the current Blender scene.
 3. Process different camera angles simultaneously
 
 ## Troubleshooting
+
+### Blender Crashes on Second Camera Capture (After Moving Camera)
+
+**This is a common issue when running camera capture multiple times after changing camera positions.**
+
+**Root Causes:**
+- GPU memory accumulation between renders
+- Scene state not properly invalidated after camera movement
+- Insufficient delays between render operations
+- Render context conflicts
+
+**Solutions:**
+
+**1. Use the Updated MCP Server Script:**
+The latest server script includes enhanced stability measures:
+- Increased rate limiting (500ms between renders)
+- Proper scene invalidation after camera changes
+- Enhanced GPU memory cleanup
+- Better error handling and recovery
+
+**2. Workflow Best Practices:**
+- Add a 1-2 second delay between camera captures in your workflow
+- Use JPEG format instead of PNG for better performance
+- Keep resolution at 1920x1080 or lower
+- Avoid rapid successive captures (< 500ms apart)
+
+**3. Blender Settings for Stability:**
+```python
+# Add these to your Blender scene for better stability:
+import bpy
+scene = bpy.context.scene
+
+# Disable persistent data to free memory between renders
+scene.render.use_persistent_data = False
+
+# Use simpler render engine for real-time capture
+scene.render.engine = 'WORKBENCH'  # or 'EEVEE' instead of 'CYCLES'
+
+# Reduce samples for faster rendering
+if scene.render.engine == 'EEVEE':
+    scene.eevee.taa_render_samples = 16  # Lower samples
+    scene.eevee.use_motion_blur = False
+    scene.eevee.use_bloom = False
+```
+
+**4. If Crashes Continue:**
+- Restart Blender between workflow runs
+- Use single captures instead of streaming
+- Monitor GPU memory usage
+- Consider using CPU rendering for complex scenes
 
 ### Blender Crashes with Metal/GPU Errors
 

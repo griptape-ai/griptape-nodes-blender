@@ -3,6 +3,7 @@ import requests
 import base64
 from typing import Optional, Any
 from io import BytesIO
+import time
 
 from griptape.artifacts import ImageArtifact, ImageUrlArtifact, ErrorArtifact, TextArtifact
 from griptape_nodes.traits.options import Options
@@ -179,20 +180,55 @@ class BlenderCameraCapture(ControlNode):
                 # Update status
                 self.parameter_output_values["status_output"] = f"Capturing frame from camera '{camera_name}'..."
 
-                # Prepare capture request
+                # Add delay between captures to prevent GPU overload
+                time.sleep(0.2)  # 200ms delay for stability
+
+                # Prepare capture request with enhanced error handling
                 capture_params = {
                     "format": output_format.lower(),
-                    "width": resolution_x,
-                    "height": resolution_y,
+                    "width": min(resolution_x, 1920),  # Cap resolution for stability
+                    "height": min(resolution_y, 1080),  # Cap resolution for stability
                     "quality": quality if output_format.upper() == "JPEG" else None
                 }
 
                 # Remove None values
                 capture_params = {k: v for k, v in capture_params.items() if v is not None}
 
-                # Make capture request
+                # Make capture request with longer timeout and retry logic
                 url = f"{self._get_mcp_server_url()}/api/camera/{camera_name}/render"
-                response = requests.get(url, params=capture_params, timeout=30)
+                
+                max_retries = 2
+                retry_delay = 1.0
+                
+                for attempt in range(max_retries + 1):
+                    try:
+                        if attempt > 0:
+                            self.parameter_output_values["status_output"] = f"Retrying capture (attempt {attempt + 1}/{max_retries + 1})..."
+                            time.sleep(retry_delay * attempt)  # Exponential backoff
+                        
+                        response = requests.get(url, params=capture_params, timeout=45)  # Increased timeout
+                        break  # Success, exit retry loop
+                        
+                    except requests.exceptions.Timeout:
+                        if attempt == max_retries:
+                            error_msg = "Timeout: Blender render took too long (>45s)"
+                            self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                            return ErrorArtifact(error_msg)
+                        continue
+                        
+                    except requests.exceptions.ConnectionError:
+                        if attempt == max_retries:
+                            error_msg = "Connection error: Cannot reach Blender MCP server"
+                            self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                            return ErrorArtifact(error_msg)
+                        continue
+                        
+                    except Exception as req_error:
+                        if attempt == max_retries:
+                            error_msg = f"Request failed: {str(req_error)}"
+                            self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                            return ErrorArtifact(error_msg)
+                        continue
 
                 if response.status_code == 200:
                     # Check if response is JSON (error) or binary (image)
@@ -209,20 +245,34 @@ class BlenderCameraCapture(ControlNode):
                         # Successful image response
                         image_data = response.content
                         
+                        # Validate image data
+                        if not image_data or len(image_data) < 100:  # Minimum reasonable image size
+                            error_msg = "Received empty or corrupted image data"
+                            self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                            return ErrorArtifact(error_msg)
+                        
                         # Save image using StaticFilesManager
                         file_extension = output_format.lower()
-                        filename = f"blender_capture_{camera_name}_{resolution_x}x{resolution_y}.{file_extension}"
+                        timestamp = int(time.time() * 1000)  # Add timestamp for uniqueness
+                        filename = f"blender_capture_{camera_name}_{resolution_x}x{resolution_y}_{timestamp}.{file_extension}"
                         
-                        static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                            image_data, filename
-                        )
+                        try:
+                            static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                                image_data, filename
+                            )
+                        except Exception as save_error:
+                            error_msg = f"Failed to save image: {str(save_error)}"
+                            self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                            return ErrorArtifact(error_msg)
                         
                         # Create ImageUrlArtifact and set output
-                        image_artifact = ImageUrlArtifact(static_url, name=f"blender_capture_{camera_name}")
+                        image_artifact = ImageUrlArtifact(static_url, name=f"blender_capture_{camera_name}_{timestamp}")
                         self.parameter_output_values["image_output"] = image_artifact
                         
-                        # Update status
-                        self.parameter_output_values["status_output"] = f"Successfully captured {resolution_x}x{resolution_y} {output_format} image from camera '{camera_name}'"
+                        # Update status with success info
+                        actual_res_x = min(resolution_x, 1920)
+                        actual_res_y = min(resolution_y, 1080)
+                        self.parameter_output_values["status_output"] = f"Successfully captured {actual_res_x}x{actual_res_y} {output_format} image from camera '{camera_name}'"
                         
                         return image_artifact
                     
@@ -231,8 +281,18 @@ class BlenderCameraCapture(ControlNode):
                         self.parameter_output_values["status_output"] = f"Error: {error_msg}"
                         return ErrorArtifact(error_msg)
                 
+                elif response.status_code == 429:
+                    error_msg = "Rate limited: Blender is processing too many requests. Try again in a moment."
+                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                    return ErrorArtifact(error_msg)
+                
+                elif response.status_code == 404:
+                    error_msg = f"Camera '{camera_name}' not found in Blender scene"
+                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                    return ErrorArtifact(error_msg)
+                
                 else:
-                    error_msg = f"Blender MCP server returned status {response.status_code}: {response.text}"
+                    error_msg = f"Blender MCP server returned status {response.status_code}: {response.text[:200]}"
                     self.parameter_output_values["status_output"] = f"Error: {error_msg}"
                     return ErrorArtifact(error_msg)
 
