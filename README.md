@@ -50,13 +50,16 @@ import json
 import time
 import threading
 import gc
+import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 class BlenderCameraHandler(BaseHTTPRequestHandler):
-    # Class-level rate limiting with longer intervals for stability
+    # Class-level rate limiting with very conservative intervals
     last_render_time = 0
-    min_render_interval = 0.5  # Increased to 500ms between renders for stability
+    min_render_interval = 1.0  # Increased to 1 second between renders
+    render_count = 0
+    max_renders_before_cleanup = 5  # Force cleanup every 5 renders
     
     def do_GET(self):
         parsed_path = urlparse(self.path)
@@ -71,7 +74,9 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                 response = {
                     "status": "ok",
                     "blender_version": bpy.app.version_string,
-                    "scene": bpy.context.scene.name
+                    "scene": bpy.context.scene.name,
+                    "render_count": BlenderCameraHandler.render_count,
+                    "render_engine": bpy.context.scene.render.engine
                 }
                 self.wfile.write(json.dumps(response).encode())
                 
@@ -91,12 +96,13 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(response).encode())
                 
             elif path.startswith('/api/camera/') and path.endswith('/render'):
-                # Enhanced rate limiting to prevent GPU overload
+                # Ultra-conservative rate limiting
                 current_time = time.time()
                 if current_time - BlenderCameraHandler.last_render_time < BlenderCameraHandler.min_render_interval:
                     self.send_error(429, "Rate limited: Too many render requests")
                     return
                 BlenderCameraHandler.last_render_time = current_time
+                BlenderCameraHandler.render_count += 1
                 
                 camera_name = path.split('/')[3]
                 
@@ -106,13 +112,18 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     self.send_error(404, f"Camera '{camera_name}' not found")
                     return
                 
-                # Get parameters with safer defaults
-                width = min(int(params.get('width', [1280])[0]), 1920)  # Reduced max resolution
-                height = min(int(params.get('height', [720])[0]), 1080)  # Reduced max resolution
-                format_type = params.get('format', ['jpeg'])[0].lower()  # Default to JPEG for speed
-                quality = max(10, min(int(params.get('quality', [75])[0]), 100))  # Clamp quality
+                # Get parameters with very conservative defaults
+                width = min(int(params.get('width', [640])[0]), 1280)  # Further reduced max
+                height = min(int(params.get('height', [480])[0]), 720)  # Further reduced max
+                format_type = params.get('format', ['jpeg'])[0].lower()
+                quality = max(10, min(int(params.get('quality', [50])[0]), 100))
                 
-                # Set render settings with enhanced cleanup
+                # Force periodic cleanup
+                if BlenderCameraHandler.render_count % BlenderCameraHandler.max_renders_before_cleanup == 0:
+                    print(f"Performing periodic cleanup after {BlenderCameraHandler.render_count} renders")
+                    self._force_cleanup()
+                
+                # Set render settings with ultra-conservative approach
                 scene = bpy.context.scene
                 original_camera = scene.camera
                 original_res_x = scene.render.resolution_x
@@ -120,15 +131,25 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                 original_format = scene.render.image_settings.file_format
                 original_quality = scene.render.image_settings.quality
                 original_percentage = scene.render.resolution_percentage
+                original_engine = scene.render.engine
+                original_device = None
+                
+                # Store original Cycles device if using Cycles
+                if hasattr(scene.cycles, 'device'):
+                    original_device = scene.cycles.device
                 
                 try:
-                    # Clear any existing render results first
-                    if 'Render Result' in bpy.data.images:
-                        bpy.data.images.remove(bpy.data.images['Render Result'])
+                    # Ultra-aggressive cleanup before render
+                    self._pre_render_cleanup()
                     
-                    # Force scene update and invalidate caches
-                    bpy.context.view_layer.update()
-                    scene.frame_set(scene.frame_current)  # Force scene refresh
+                    # Force CPU rendering for maximum stability
+                    if scene.render.engine == 'CYCLES':
+                        scene.cycles.device = 'CPU'
+                        print("Forced CPU rendering for stability")
+                    elif scene.render.engine not in ['WORKBENCH', 'EEVEE']:
+                        # Switch to Workbench for fastest, most stable rendering
+                        scene.render.engine = 'WORKBENCH'
+                        print("Switched to Workbench engine for stability")
                     
                     # Set camera and render settings
                     scene.camera = camera_obj
@@ -136,33 +157,42 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     scene.render.resolution_y = height
                     scene.render.resolution_percentage = 100
                     
-                    # Use GPU-friendly settings with enhanced stability
+                    # Ultra-conservative image settings
                     if format_type == 'png':
                         scene.render.image_settings.file_format = 'PNG'
-                        scene.render.image_settings.compression = 50  # Faster compression
-                        scene.render.image_settings.color_mode = 'RGB'  # Avoid alpha for stability
-                    elif format_type == 'jpeg':
+                        scene.render.image_settings.compression = 15  # Minimal compression
+                        scene.render.image_settings.color_mode = 'RGB'
+                    else:  # Default to JPEG for everything else
                         scene.render.image_settings.file_format = 'JPEG'
                         scene.render.image_settings.quality = quality
                         scene.render.image_settings.color_mode = 'RGB'
-                    elif format_type == 'exr':
-                        scene.render.image_settings.file_format = 'OPEN_EXR'
-                        scene.render.image_settings.color_mode = 'RGB'
-                    elif format_type == 'tiff':
-                        scene.render.image_settings.file_format = 'TIFF'
-                        scene.render.image_settings.color_mode = 'RGB'
                     
-                    # Additional stability settings
-                    scene.render.use_persistent_data = False  # Disable persistent data to free memory
+                    # Disable all non-essential render features
+                    scene.render.use_persistent_data = False
+                    scene.render.use_motion_blur = False
                     
-                    # Force complete scene update before render
-                    bpy.context.view_layer.update()
+                    # Additional Eevee optimizations if using Eevee
+                    if scene.render.engine == 'EEVEE':
+                        scene.eevee.taa_render_samples = 8  # Minimal samples
+                        scene.eevee.use_motion_blur = False
+                        scene.eevee.use_bloom = False
+                        scene.eevee.use_ssr = False  # Disable screen space reflections
+                        scene.eevee.use_volumetric_lights = False
+                    
+                    # Force complete scene update with multiple passes
+                    for _ in range(3):  # Multiple update passes for stability
+                        bpy.context.view_layer.update()
+                        time.sleep(0.05)
+                    
+                    scene.frame_set(scene.frame_current)
                     bpy.context.evaluated_depsgraph_get().update()
                     
-                    # Add small delay before render to allow GPU to stabilize
-                    time.sleep(0.1)
+                    # Longer stabilization delay
+                    time.sleep(0.3)
                     
-                    # Render with enhanced error handling
+                    print(f"Starting render {BlenderCameraHandler.render_count}: {width}x{height} {format_type}")
+                    
+                    # Render with maximum error protection
                     try:
                         bpy.ops.render.render(write_still=False)
                     except Exception as render_error:
@@ -170,41 +200,49 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                         self.send_error(500, f"Render failed: {str(render_error)}")
                         return
                     
-                    # Get image data with validation
+                    # Get and validate image data
                     image = bpy.data.images.get('Render Result')
-                    if not image or not image.pixels:
+                    if not image or not hasattr(image, 'pixels') or len(image.pixels) == 0:
                         self.send_error(500, "Render failed - no result image or empty pixels")
                         return
                     
-                    # Save to memory with enhanced error handling
-                    temp_path = f"/tmp/blender_render_{threading.current_thread().ident}_{int(time.time())}.{format_type}"
+                    # Save with enhanced error handling and unique naming
+                    temp_dir = "/tmp"
+                    if not os.path.exists(temp_dir):
+                        temp_dir = bpy.app.tempdir
+                    
+                    timestamp = int(time.time() * 1000)
+                    thread_id = threading.current_thread().ident
+                    temp_path = os.path.join(temp_dir, f"blender_render_{thread_id}_{timestamp}.{format_type}")
+                    
                     try:
                         image.save_render(temp_path)
+                        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                            raise Exception("Saved file is empty or doesn't exist")
                     except Exception as save_error:
                         print(f"Failed to save render: {save_error}")
                         self.send_error(500, f"Failed to save render: {str(save_error)}")
                         return
                     
-                    # Read and send with validation
+                    # Read and validate file
                     try:
                         with open(temp_path, 'rb') as f:
                             image_data = f.read()
                         
-                        if not image_data:
-                            self.send_error(500, "Rendered image file is empty")
-                            return
+                        if not image_data or len(image_data) < 100:
+                            raise Exception("Image data is empty or too small")
                             
                     except Exception as read_error:
                         print(f"Failed to read rendered image: {read_error}")
                         self.send_error(500, f"Failed to read rendered image: {str(read_error)}")
                         return
-                    
-                    # Clean up temp file immediately
-                    import os
-                    try:
-                        os.remove(temp_path)
-                    except Exception as cleanup_error:
-                        print(f"Warning: Failed to clean up temp file: {cleanup_error}")
+                    finally:
+                        # Always clean up temp file
+                        try:
+                            if os.path.exists(temp_path):
+                                os.remove(temp_path)
+                        except Exception as cleanup_error:
+                            print(f"Warning: Failed to clean up temp file: {cleanup_error}")
                     
                     # Send successful response
                     self.send_response(200)
@@ -213,35 +251,28 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
                     self.end_headers()
                     self.wfile.write(image_data)
                     
+                    print(f"Render {BlenderCameraHandler.render_count} completed successfully")
+                    
                 finally:
-                    # Enhanced cleanup - always restore original settings
+                    # Ultra-comprehensive cleanup
                     try:
+                        # Restore all original settings
                         scene.camera = original_camera
                         scene.render.resolution_x = original_res_x
                         scene.render.resolution_y = original_res_y
                         scene.render.resolution_percentage = original_percentage
                         scene.render.image_settings.file_format = original_format
                         scene.render.image_settings.quality = original_quality
+                        scene.render.engine = original_engine
                         
-                        # Clear render result to free GPU memory
-                        if 'Render Result' in bpy.data.images:
-                            bpy.data.images.remove(bpy.data.images['Render Result'])
+                        if original_device and hasattr(scene.cycles, 'device'):
+                            scene.cycles.device = original_device
                         
-                        # Force scene update to apply changes
-                        bpy.context.view_layer.update()
+                        # Post-render cleanup
+                        self._post_render_cleanup()
                         
-                        # Enhanced garbage collection for GPU memory
-                        gc.collect()
-                        
-                        # Additional GPU memory cleanup (if available)
-                        try:
-                            import bgl
-                            bgl.glFinish()  # Wait for GPU operations to complete
-                        except:
-                            pass  # bgl might not be available in all Blender builds
-                            
                     except Exception as cleanup_error:
-                        print(f"Warning: Cleanup failed: {cleanup_error}")
+                        print(f"Warning: Settings restoration failed: {cleanup_error}")
                 
             else:
                 self.send_error(404, "Endpoint not found")
@@ -251,12 +282,82 @@ class BlenderCameraHandler(BaseHTTPRequestHandler):
             import traceback
             traceback.print_exc()
             self.send_error(500, str(e))
+    
+    def _pre_render_cleanup(self):
+        """Aggressive cleanup before rendering."""
+        try:
+            # Clear all render results
+            for img_name in ['Render Result', 'Viewer Node']:
+                if img_name in bpy.data.images:
+                    bpy.data.images.remove(bpy.data.images[img_name])
+            
+            # Clear orphaned data
+            bpy.data.orphans_purge()
+            
+            # Force garbage collection
+            gc.collect()
+            
+        except Exception as e:
+            print(f"Pre-render cleanup warning: {e}")
+    
+    def _post_render_cleanup(self):
+        """Cleanup after rendering."""
+        try:
+            # Clear render result
+            if 'Render Result' in bpy.data.images:
+                bpy.data.images.remove(bpy.data.images['Render Result'])
+            
+            # Force scene update
+            bpy.context.view_layer.update()
+            
+            # Enhanced garbage collection
+            gc.collect()
+            
+            # GPU memory cleanup if available
+            try:
+                import bgl
+                bgl.glFinish()
+            except:
+                pass
+            
+            # Additional delay for GPU recovery
+            time.sleep(0.1)
+            
+        except Exception as e:
+            print(f"Post-render cleanup warning: {e}")
+    
+    def _force_cleanup(self):
+        """Periodic forced cleanup."""
+        try:
+            print("Performing forced cleanup...")
+            
+            # Clear all images except essential ones
+            essential_images = {'Render Result', 'Viewer Node'}
+            for img in list(bpy.data.images):
+                if img.name not in essential_images and img.users == 0:
+                    bpy.data.images.remove(img)
+            
+            # Purge orphaned data
+            bpy.data.orphans_purge()
+            
+            # Force multiple garbage collection passes
+            for _ in range(3):
+                gc.collect()
+                time.sleep(0.05)
+            
+            print("Forced cleanup completed")
+            
+        except Exception as e:
+            print(f"Forced cleanup warning: {e}")
 
 def start_server():
     server = HTTPServer(('localhost', 8080), BlenderCameraHandler)
     print("Blender Camera Server started on http://localhost:8080")
-    print("Enhanced GPU-safe rendering enabled with improved stability")
-    print("Rate limiting: 500ms minimum between renders")
+    print("ULTRA-STABLE MODE:")
+    print("- CPU rendering enforced for Cycles")
+    print("- 1 second minimum between renders")
+    print("- Aggressive memory cleanup")
+    print("- Periodic forced cleanup every 5 renders")
     server.serve_forever()
 
 # Start server in background thread
