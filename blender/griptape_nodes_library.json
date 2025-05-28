@@ -4,7 +4,7 @@
     "settings": [],
     "metadata": {
         "author": "Griptape",
-        "description": "Griptape Nodes for interacting with Blender via MCP (Model Context Protocol) for real-time camera capture and scene interaction.",
+        "description": "Griptape Nodes for interacting with Blender via socket communication for real-time camera capture and scene interaction.",
         "library_version": "0.1.0",
         "engine_version": "0.1.0",
         "tags": [
@@ -13,12 +13,10 @@
             "3D",
             "Camera",
             "Real-time",
-            "MCP"
+            "Socket"
         ],
         "dependencies": {
-            "pip_dependencies": [
-                "mcp>=1.0.0"
-            ]
+            "pip_dependencies": []
         }
     },
     "categories": [
@@ -26,7 +24,7 @@
             "Blender": {
                 "color": "border-orange-500",
                 "title": "Blender",
-                "description": "Nodes for real-time interaction with Blender scenes via MCP server.",
+                "description": "Nodes for real-time interaction with Blender scenes via socket server.",
                 "icon": "Camera"
             }
         }

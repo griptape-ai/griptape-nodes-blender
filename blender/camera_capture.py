@@ -11,17 +11,23 @@ from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, Parame
 from griptape_nodes.exe_types.node_types import ControlNode
 from griptape_nodes.retained_mode.griptape_nodes import logger, GriptapeNodes
 
-# Import MCP client utilities
-from .mcp_client import run_async_in_node, render_camera_async, list_cameras_async, get_scene_info_async
+# Import socket client utilities
+from socket_client import health_check, get_scene_info, list_cameras, render_camera
 
 
 class BlenderCameraCapture(ControlNode):
+    # Class-level registry to track all instances
+    _instances = []
+    
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.category = "Blender"
-        self.description = "Captures a single frame from a Blender camera via MCP server."
+        self.description = "Captures a single frame from a Blender camera via socket server."
         self.metadata["author"] = "Griptape"
-        self.metadata["dependencies"] = {"pip_dependencies": ["mcp", "nest-asyncio"]}
+        self.metadata["dependencies"] = {}
+        
+        # Register this instance
+        BlenderCameraCapture._instances.append(self)
 
         # Camera list input (optional - for connecting to BlenderCameraList node)
         self.add_parameter(
@@ -34,20 +40,88 @@ class BlenderCameraCapture(ControlNode):
             )
         )
 
-        # Camera Settings Group
-        with ParameterGroup(name="Camera Settings") as camera_group:
+        # Camera name parameter (add directly to ensure traits work properly)
+        available_cameras = self._get_available_cameras()
+        
+        options_trait = Options(choices=available_cameras)
+        
+        self.camera_param = Parameter(
+            name="camera_name",
+            input_types=["str"],
+            output_type="str",
+            type="str",
+            default_value="Camera",
+            tooltip="Name of the camera in the Blender scene to capture from.",
+            allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
+            traits={options_trait},
+            ui_options={"display_name": "Camera"}
+        )
+        
+        # Try adding the trait after parameter creation
+        if hasattr(self.camera_param, 'add_trait'):
+            self.camera_param.add_trait(options_trait)
+        elif hasattr(self.camera_param, 'traits'):
+            if self.camera_param.traits is None:
+                self.camera_param.traits = set()
+            self.camera_param.traits.add(options_trait)
+        else:
+            if not hasattr(self.camera_param, '_traits'):
+                self.camera_param._traits = set()
+            self.camera_param._traits.add(options_trait)
+        
+        self.add_parameter(self.camera_param)
+        
+        # Camera metadata label parameters (read-only, displayed under camera selection)
+        self.add_parameter(
             Parameter(
-                name="camera_name",
-                input_types=["str"],
-                output_type="str",
+                name="camera_status_label",
                 type="str",
-                default_value="Camera",
-                tooltip="Name of the camera in the Blender scene to capture from.",
-                allowed_modes={ParameterMode.INPUT, ParameterMode.PROPERTY},
-                traits={Options(choices=self._get_available_cameras())},
-                ui_options={"display_name": "Camera"}
+                default_value="",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Camera status (active/available)",
+                ui_options={"display_name": "Status"}
             )
-        self.add_node_element(camera_group)
+        )
+        self.add_parameter(
+            Parameter(
+                name="focal_length_label",
+                type="str",
+                default_value="",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Camera focal length",
+                ui_options={"display_name": "Focal Length"}
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="sensor_info_label",
+                type="str", 
+                default_value="",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Camera sensor dimensions and type",
+                ui_options={"display_name": "Sensor"}
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="dof_info_label",
+                type="str",
+                default_value="",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Depth of field settings",
+                ui_options={"display_name": "Depth of Field"}
+            )
+        )
+        self.add_parameter(
+            Parameter(
+                name="transform_info_label",
+                type="str",
+                default_value="",
+                allowed_modes={ParameterMode.PROPERTY},
+                tooltip="Camera location and rotation",
+                ui_options={"display_name": "Transform"}
+            )
+        )
 
         # Output Settings Group
         with ParameterGroup(name="Output Settings") as output_group:
@@ -118,34 +192,78 @@ class BlenderCameraCapture(ControlNode):
             )
         )
 
+        # Update camera metadata display
+        self._update_camera_metadata_display()
+
     def _get_available_cameras(self) -> list[str]:
-        """Fetch available cameras from the Blender MCP server."""
+        """Fetch available cameras from the Blender socket server."""
         try:
-            result = run_async_in_node(list_cameras_async())
+            result = list_cameras()
             if result.get("success") and result.get("cameras"):
                 return [camera["name"] for camera in result["cameras"]]
             else:
                 logger.warning(f"Could not fetch cameras: {result.get('error', 'Unknown error')}")
                 return ["Camera"]
         except Exception as e:
-            logger.warning(f"Could not fetch cameras from Blender MCP server: {e}")
+            logger.warning(f"Could not fetch cameras from Blender socket server: {e}")
             return ["Camera"]
 
-    def _check_blender_connection(self) -> tuple[bool, str]:
-        """Check if Blender MCP server is available."""
+    @classmethod
+    def _update_all_camera_lists(cls):
+        """Update camera lists for all BlenderCameraCapture instances."""
         try:
-            result = run_async_in_node(get_scene_info_async())
+            # Get fresh camera list
+            cameras = []
+            result = list_cameras()
+            if result.get("success") and result.get("cameras"):
+                cameras = [camera["name"] for camera in result["cameras"]]
+            else:
+                cameras = ["Camera"]  # Fallback
+            
+            # Update all instances
+            for instance in cls._instances:
+                if instance:  # Check instance is still valid
+                    camera_param = instance.get_parameter_by_name("camera_name")
+                    if camera_param:
+                        instance._update_camera_choices(camera_param, cameras)
+        except Exception as e:
+            logger.warning(f"Failed to update camera lists: {e}")
+
+    @classmethod
+    def _update_camera_lists_from_blender(cls):
+        """Update camera lists for all instances by fetching from Blender."""
+        try:
+            # Get fresh camera list from Blender
+            cameras = []
+            result = list_cameras()
+            if result.get("success") and result.get("cameras"):
+                cameras = [camera["name"] for camera in result["cameras"]]
+            else:
+                cameras = ["Camera"]  # Fallback
+            
+            # Update all instances with the fetched camera names
+            cls._update_all_camera_lists_with_names(cameras)
+        except Exception as e:
+            logger.warning(f"Failed to update camera lists from Blender: {e}")
+
+    def _check_blender_connection(self) -> tuple[bool, str]:
+        """Check if Blender socket server is available."""
+        try:
+            result = get_scene_info()
             if result.get("success"):
                 blender_info = result.get("blender", {})
                 version = blender_info.get("version", "Unknown")
                 return True, f"Connected to Blender {version}"
             else:
-                return False, f"Blender MCP server error: {result.get('error', 'Unknown error')}"
+                return False, f"Blender socket server error: {result.get('error', 'Unknown error')}"
         except Exception as e:
-            return False, f"Cannot connect to Blender MCP server: {str(e)}"
+            return False, f"Cannot connect to Blender socket server: {str(e)}"
 
     def validate_before_node_run(self) -> list[Exception] | None:
-        """Validate that Blender MCP server is available before running."""
+        """Validate that Blender socket server is available before running."""
+        # Note: Camera list updates are now handled by the BlenderCameraList node
+        # which always re-evaluates and provides fresh data via cameras_input
+        
         is_connected, message = self._check_blender_connection()
         if not is_connected:
             return [ConnectionError(message)]
@@ -153,108 +271,295 @@ class BlenderCameraCapture(ControlNode):
 
     def process(self):
         """Capture a frame from the specified Blender camera."""
-        def capture_frame_async():
-            try:
-                # Get parameters
-                camera_name = self.get_parameter_value("camera_name") or "Camera"
-                output_format = self.get_parameter_value("output_format") or "PNG"
-                resolution_x = self.get_parameter_value("resolution_x") or 1920
-                resolution_y = self.get_parameter_value("resolution_y") or 1080
-                quality = self.get_parameter_value("quality") or 90
+        try:
+            # Get parameters
+            camera_name = self.get_parameter_value("camera_name") or "Camera"
+            output_format = self.get_parameter_value("output_format") or "PNG"
+            resolution_x = self.get_parameter_value("resolution_x") or 1920
+            resolution_y = self.get_parameter_value("resolution_y") or 1080
+            quality = self.get_parameter_value("quality") or 90
 
-                # If cameras_input is connected, validate camera_name exists in the list
-                cameras_input = self.get_parameter_value("cameras_input")
-                if cameras_input and hasattr(cameras_input, 'value'):
-                    available_cameras = [cam.get('name', '') for cam in cameras_input.value if isinstance(cam, dict)]
-                    if camera_name not in available_cameras and available_cameras:
-                        camera_name = available_cameras[0]  # Use first available camera
-
-                # Update status
-                self.parameter_output_values["status_output"] = f"Capturing frame from camera '{camera_name}'..."
-
-                # Call MCP server to render camera
-                result = run_async_in_node(render_camera_async(
-                    camera_name=camera_name,
-                    width=resolution_x,
-                    height=resolution_y,
-                    format_type=output_format.upper(),
-                    quality=quality
-                ))
-
-                if not result.get("success"):
-                    error_msg = result.get("error", "Unknown error from Blender MCP server")
-                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
-                    return ErrorArtifact(error_msg)
-
-                # Get image data from result
-                image_b64 = result.get("image")
-                if not image_b64:
-                    error_msg = "No image data received from Blender MCP server"
-                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
-                    return ErrorArtifact(error_msg)
-
-                # Decode base64 image data
-                try:
-                    image_data = base64.b64decode(image_b64)
-                except Exception as decode_error:
-                    error_msg = f"Failed to decode image data: {str(decode_error)}"
-                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
-                    return ErrorArtifact(error_msg)
-
-                # Validate image data
-                if not image_data or len(image_data) < 100:
-                    error_msg = "Received empty or corrupted image data"
-                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
-                    return ErrorArtifact(error_msg)
-
-                # Save image using StaticFilesManager
-                file_extension = output_format.lower()
-                timestamp = int(time.time() * 1000)
-                filename = f"blender_capture_{camera_name}_{resolution_x}x{resolution_y}_{timestamp}.{file_extension}"
+            # If cameras_input is connected, validate camera_name exists in the list
+            cameras_input = self.get_parameter_value("cameras_input")
+            
+            if cameras_input and hasattr(cameras_input, 'value'):
+                available_cameras = []
+                for item in cameras_input.value:
+                    if hasattr(item, 'value'):
+                        try:
+                            # Parse JSON from TextArtifact
+                            camera_data = json.loads(item.value)
+                            if 'name' in camera_data:
+                                available_cameras.append(camera_data['name'])
+                        except (json.JSONDecodeError, AttributeError):
+                            # Skip invalid items
+                            continue
                 
-                try:
-                    static_url = GriptapeNodes.StaticFilesManager().save_static_file(
-                        image_data, filename
-                    )
-                except Exception as save_error:
-                    error_msg = f"Failed to save image: {str(save_error)}"
-                    self.parameter_output_values["status_output"] = f"Error: {error_msg}"
-                    return ErrorArtifact(error_msg)
+                if camera_name not in available_cameras and available_cameras:
+                    camera_name = available_cameras[0]  # Use first available camera
 
-                # Create ImageUrlArtifact and set output
-                image_artifact = ImageUrlArtifact(static_url, name=f"blender_capture_{camera_name}_{timestamp}")
-                self.parameter_output_values["image_output"] = image_artifact
+            # Update camera metadata display 
+            self._update_camera_metadata_display()
 
-                # Update status with success info
-                render_time = result.get("render_time", 0)
-                engine = result.get("engine", "Unknown")
-                actual_width = result.get("width", resolution_x)
-                actual_height = result.get("height", resolution_y)
-                
-                status_msg = f"Successfully captured {actual_width}x{actual_height} {output_format} image from camera '{camera_name}'\n"
-                status_msg += f"Render time: {render_time:.2f}s, Engine: {engine}"
-                self.parameter_output_values["status_output"] = status_msg
+            # Update status
+            self.parameter_output_values["status_output"] = f"Capturing frame from camera '{camera_name}'..."
 
-                return image_artifact
+            # Call socket server to render camera
+            result = render_camera(
+                camera_name=camera_name,
+                width=resolution_x,
+                height=resolution_y,
+                format_type=output_format.upper(),
+                quality=quality
+            )
 
-            except Exception as e:
-                error_msg = f"Failed to capture frame: {str(e)}"
-                logger.error(f"BlenderCameraCapture error: {error_msg}")
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error from Blender socket server")
                 self.parameter_output_values["status_output"] = f"Error: {error_msg}"
-                return ErrorArtifact(error_msg)
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
 
-        yield capture_frame_async
+            # Get the actual render result from execute_code response
+            render_result = result.get("result", {})
+            if not render_result.get("success"):
+                error_msg = render_result.get("error", "Render failed in Blender")
+                self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
+
+            # Get image data from render result
+            image_b64 = render_result.get("image")
+            if not image_b64:
+                error_msg = "No image data received from Blender socket server"
+                self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
+
+            # Decode base64 image data
+            try:
+                image_data = base64.b64decode(image_b64)
+            except Exception as decode_error:
+                error_msg = f"Failed to decode image data: {str(decode_error)}"
+                self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
+
+            # Validate image data
+            if not image_data or len(image_data) < 100:
+                error_msg = "Received empty or corrupted image data"
+                self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
+
+            # Save image using StaticFilesManager
+            file_extension = output_format.lower()
+            timestamp = int(time.time() * 1000)
+            filename = f"blender_capture_{camera_name}_{resolution_x}x{resolution_y}_{timestamp}.{file_extension}"
+            
+            try:
+                static_url = GriptapeNodes.StaticFilesManager().save_static_file(
+                    image_data, filename
+                )
+            except Exception as save_error:
+                error_msg = f"Failed to save image: {str(save_error)}"
+                self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+                self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+                return
+
+            # Create ImageUrlArtifact and set output
+            image_artifact = ImageUrlArtifact(static_url, name=f"blender_capture_{camera_name}_{timestamp}")
+            self.parameter_output_values["image_output"] = image_artifact
+
+            # Update status with success info
+            render_time = render_result.get("render_time", 0)
+            engine = "BLENDER_WORKBENCH"  # We know this from the render code
+            actual_width = render_result.get("width", resolution_x)
+            actual_height = render_result.get("height", resolution_y)
+            
+            status_msg = f"Successfully captured {actual_width}x{actual_height} {output_format} image from camera '{camera_name}'\n"
+            status_msg += f"Render time: {render_time:.2f}s, Engine: {engine}"
+            self.parameter_output_values["status_output"] = status_msg
+
+        except Exception as e:
+            error_msg = f"Failed to capture frame: {str(e)}"
+            logger.error(f"BlenderCameraCapture error: {error_msg}")
+            self.parameter_output_values["status_output"] = f"Error: {error_msg}"
+            self.parameter_output_values["image_output"] = ErrorArtifact(error_msg)
+
+    def after_value_set(self, parameter, value, modified_parameters_set):
+        """Update camera choices when cameras_input receives new data."""
+        if parameter.name == "cameras_input" and value:
+            try:
+                # Extract camera names from the ListArtifact
+                if hasattr(value, 'value') and isinstance(value.value, list):
+                    # Parse camera data from TextArtifacts containing JSON
+                    camera_names = []
+                    for i, item in enumerate(value.value):
+                        if hasattr(item, 'value'):
+                            try:
+                                # Each item should be a TextArtifact with JSON camera data
+                                camera_data = json.loads(item.value)
+                                if 'name' in camera_data:
+                                    camera_names.append(camera_data['name'])
+                            except (json.JSONDecodeError, AttributeError) as e:
+                                # Skip invalid items
+                                continue
+                    
+                    if camera_names:
+                        # Update current instance camera parameter choices
+                        camera_param = self.get_parameter_by_name("camera_name")
+                        if camera_param:
+                            success = self._update_camera_choices(camera_param, camera_names)
+                            if success:
+                                # Include the parameter in modified_parameters_set to trigger UI update
+                                modified_parameters_set.add("camera_name")
+                            
+                            # Note: Not updating all other instances here to prevent feedback loops
+                            # Other instances will get updated when their own cameras_input changes
+                        
+                        # Update camera metadata display
+                        self._update_camera_metadata_display(modified_parameters_set)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+        elif parameter.name == "camera_name":
+            # Update metadata display when camera selection changes
+            self._update_camera_metadata_display(modified_parameters_set)
+
+    def _update_camera_choices(self, camera_param, camera_names):
+        """Helper method to update camera choices for a parameter."""
+        try:
+            # Try to find existing Options trait
+            options_trait = None
+            trait_found = False
+            
+            if hasattr(camera_param, 'traits') and camera_param.traits:
+                for i, trait in enumerate(camera_param.traits):
+                    if hasattr(trait, 'choices'):
+                        old_choices = trait.choices
+                        trait.choices = camera_names
+                        trait_found = True
+                        break
+            elif hasattr(camera_param, '_traits') and camera_param._traits:
+                for i, trait in enumerate(camera_param._traits):
+                    if hasattr(trait, 'choices'):
+                        old_choices = trait.choices
+                        trait.choices = camera_names
+                        trait_found = True
+                        break
+            
+            # If no traits found, try to create and add one
+            if not trait_found:
+                try:
+                    from griptape_nodes.traits.options import Options
+                    new_options_trait = Options(choices=camera_names)
+                    
+                    # Try different ways to add the trait
+                    if hasattr(camera_param, 'add_trait'):
+                        camera_param.add_trait(new_options_trait)
+                        trait_found = True
+                    elif hasattr(camera_param, 'traits'):
+                        if camera_param.traits is None:
+                            camera_param.traits = set()
+                        camera_param.traits.add(new_options_trait)
+                        trait_found = True
+                    else:
+                        if not hasattr(camera_param, '_traits'):
+                            camera_param._traits = set()
+                        camera_param._traits.add(new_options_trait)
+                        trait_found = True
+                        
+                except Exception as e:
+                    pass
+            
+            return trait_found
+        except Exception as e:
+            return False
+
+    @classmethod
+    def _update_all_camera_lists_with_names(cls, camera_names, skip_instance=None):
+        """Update camera lists for all instances with provided camera names."""
+        for i, instance in enumerate(cls._instances):
+            if instance and instance != skip_instance:  # Skip the instance that was already updated
+                camera_param = instance.get_parameter_by_name("camera_name")
+                if camera_param:
+                    instance._update_camera_choices(camera_param, camera_names)
 
     def after_incoming_connection(self, source_node, source_parameter, target_parameter, modified_parameters_set=None):
         """Refresh camera list when connections are made."""
         if target_parameter.name == "camera_name":
-            # Refresh available cameras
-            cameras = self._get_available_cameras()
-            if cameras:
-                # Update the Options trait with new camera list
-                camera_param = self.get_parameter_by_name("camera_name")
-                if camera_param and camera_param.traits:
-                    for trait in camera_param.traits:
-                        if hasattr(trait, 'choices'):
-                            trait.choices = cameras
-                            break 
+            # Camera updates now handled by BlenderCameraList node via cameras_input
+            pass
+        elif target_parameter.name == "cameras_input":
+            # Camera list data will flow through this connection automatically
+            pass
+
+    def _update_camera_metadata_display(self, modified_parameters_set=None):
+        """Update the camera metadata label parameters based on current selection and available data."""
+        camera_name = self.get_parameter_value("camera_name") or "Camera"
+        cameras_input = self.get_parameter_value("cameras_input")
+        
+        # Find the selected camera's data
+        camera_data = None
+        if cameras_input and hasattr(cameras_input, 'value'):
+            for item in cameras_input.value:
+                if hasattr(item, 'value'):
+                    try:
+                        parsed_data = json.loads(item.value)
+                        if parsed_data.get('name') == camera_name:
+                            camera_data = parsed_data
+                            break
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+        
+        if camera_data and 'focal_length' in camera_data:
+            # Enhanced camera data available - show detailed labels
+            
+            # Status label
+            status_text = "✓ Active Scene Camera" if camera_data.get('active') else "Available Camera"
+            self.set_parameter_value("camera_status_label", status_text)
+            
+            # Focal length label
+            focal_length = camera_data.get('focal_length', 50.0)
+            self.set_parameter_value("focal_length_label", f"{focal_length} mm")
+            
+            # Sensor info label
+            sensor_w = camera_data.get('sensor_width', 36.0)
+            sensor_h = camera_data.get('sensor_height', 24.0) 
+            sensor_fit = camera_data.get('sensor_fit', 'AUTO')
+            cam_type = camera_data.get('type', 'PERSP')
+            sensor_text = f"{sensor_w}×{sensor_h}mm, {sensor_fit}, {cam_type}"
+            self.set_parameter_value("sensor_info_label", sensor_text)
+            
+            # Depth of field label
+            dof = camera_data.get('depth_of_field', {})
+            if dof.get('enabled'):
+                focus_dist = dof.get('focus_distance', 10.0)
+                f_stop = dof.get('f_stop', 2.8)
+                dof_text = f"Enabled: {focus_dist}BU @ f/{f_stop}"
+            else:
+                dof_text = "Disabled"
+            self.set_parameter_value("dof_info_label", dof_text)
+            
+            # Transform label
+            location = camera_data.get('location', {})
+            rotation = camera_data.get('rotation', {})
+            loc_text = f"({location.get('x', 0.0):.2f}, {location.get('y', 0.0):.2f}, {location.get('z', 0.0):.2f})"
+            rot_text = f"({rotation.get('x', 0.0):.2f}, {rotation.get('y', 0.0):.2f}, {rotation.get('z', 0.0):.2f})"
+            transform_text = f"Loc: {loc_text} Rot: {rot_text}"
+            self.set_parameter_value("transform_info_label", transform_text)
+            
+        else:
+            # No enhanced data - show placeholder values
+            self.set_parameter_value("camera_status_label", "Connect BlenderCameraList for details")
+            self.set_parameter_value("focal_length_label", "-")
+            self.set_parameter_value("sensor_info_label", "-")
+            self.set_parameter_value("dof_info_label", "-") 
+            self.set_parameter_value("transform_info_label", "-")
+            
+        # Mark all label parameters as modified for UI updates
+        if modified_parameters_set is not None:
+            modified_parameters_set.update([
+                "camera_status_label", "focal_length_label", "sensor_info_label",
+                "dof_info_label", "transform_info_label"
+            ]) 
