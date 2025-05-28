@@ -1,19 +1,10 @@
 {
     "name": "Blender Library",
     "library_schema_version": "0.1.0",
-    "settings": [
-        {
-            "description": "Configuration for Blender MCP server connection",
-            "category": "nodes.Blender",
-            "contents": {
-                "BLENDER_MCP_HOST": "localhost",
-                "BLENDER_MCP_PORT": "8080"
-            }
-        }
-    ],
+    "settings": [],
     "metadata": {
         "author": "Griptape",
-        "description": "Griptape Nodes for interacting with Blender via MCP server for real-time camera capture and scene interaction.",
+        "description": "Griptape Nodes for interacting with Blender via MCP (Model Context Protocol) for real-time camera capture and scene interaction.",
         "library_version": "0.1.0",
         "engine_version": "0.1.0",
         "tags": [
@@ -26,7 +17,7 @@
         ],
         "dependencies": {
             "pip_dependencies": [
-                "requests"
+                "mcp>=1.0.0"
             ]
         }
     },
@@ -48,15 +39,6 @@
                 "category": "Blender",
                 "description": "Captures a single frame from a Blender camera with configurable output format and resolution.",
                 "display_name": "Blender Camera Capture"
-            }
-        },
-        {
-            "class_name": "BlenderCameraStream",
-            "file_path": "camera_stream.py",
-            "metadata": {
-                "category": "Blender",
-                "description": "Provides real-time streaming from a Blender camera with configurable frame rate and format.",
-                "display_name": "Blender Camera Stream"
             }
         },
         {

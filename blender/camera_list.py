@@ -1,11 +1,13 @@
 import json
-import requests
 from typing import Optional, Any, List, Dict
 
 from griptape.artifacts import TextArtifact, ErrorArtifact, ListArtifact
 from griptape_nodes.exe_types.core_types import Parameter, ParameterMode, ParameterGroup
 from griptape_nodes.exe_types.node_types import DataNode
 from griptape_nodes.retained_mode.griptape_nodes import logger
+
+# Import MCP client utilities
+from .mcp_client import run_async_in_node, list_cameras_async, get_scene_info_async
 
 
 class BlenderCameraList(DataNode):
@@ -14,7 +16,7 @@ class BlenderCameraList(DataNode):
         self.category = "Blender"
         self.description = "Lists all available cameras in the current Blender scene."
         self.metadata["author"] = "Griptape"
-        self.metadata["dependencies"] = {"pip_dependencies": ["requests"]}
+        self.metadata["dependencies"] = {"pip_dependencies": ["mcp", "nest-asyncio"]}
 
         # Control Parameters
         self.add_parameter(
@@ -74,36 +76,26 @@ class BlenderCameraList(DataNode):
             )
         )
 
-    def _get_mcp_server_url(self) -> str:
-        """Get the MCP server URL from configuration."""
-        host = self.get_config_value("Blender", "BLENDER_MCP_HOST") or "localhost"
-        port = self.get_config_value("Blender", "BLENDER_MCP_PORT") or "8080"
-        return f"http://{host}:{port}"
-
     def _check_blender_connection(self) -> tuple[bool, str]:
         """Check if Blender MCP server is available."""
         try:
-            url = f"{self._get_mcp_server_url()}/api/status"
-            response = requests.get(url, timeout=5)
-            if response.status_code == 200:
-                status_data = response.json()
-                return True, f"Connected to Blender {status_data.get('blender_version', 'Unknown')}"
+            result = run_async_in_node(get_scene_info_async())
+            if result.get("success"):
+                blender_info = result.get("blender", {})
+                version = blender_info.get("version", "Unknown")
+                return True, f"Connected to Blender {version}"
             else:
-                return False, f"Blender MCP server returned status {response.status_code}"
-        except requests.exceptions.ConnectionError:
-            return False, "Cannot connect to Blender MCP server. Make sure Blender is running with the MCP server."
+                return False, f"Blender MCP server error: {result.get('error', 'Unknown error')}"
         except Exception as e:
-            return False, f"Error connecting to Blender: {str(e)}"
+            return False, f"Cannot connect to Blender MCP server: {str(e)}"
 
     def _fetch_cameras(self) -> tuple[List[Dict], str]:
         """Fetch camera information from Blender MCP server."""
         try:
-            url = f"{self._get_mcp_server_url()}/api/cameras"
-            response = requests.get(url, timeout=10)
+            result = run_async_in_node(list_cameras_async())
             
-            if response.status_code == 200:
-                data = response.json()
-                cameras = data.get("cameras", [])
+            if result.get("success"):
+                cameras = result.get("cameras", [])
                 
                 if cameras:
                     status = f"Successfully found {len(cameras)} camera(s) in the scene"
@@ -112,7 +104,7 @@ class BlenderCameraList(DataNode):
                     status = "No cameras found in the current Blender scene"
                     return [], status
             else:
-                error_msg = f"Blender MCP server returned status {response.status_code}: {response.text}"
+                error_msg = f"Blender MCP server error: {result.get('error', 'Unknown error')}"
                 return [], error_msg
 
         except Exception as e:
@@ -135,7 +127,8 @@ class BlenderCameraList(DataNode):
                     "x": round(camera.get("rotation", [0, 0, 0])[0], 3),
                     "y": round(camera.get("rotation", [0, 0, 0])[1], 3),
                     "z": round(camera.get("rotation", [0, 0, 0])[2], 3)
-                }
+                },
+                "active": camera.get("active", False)
             }
             formatted_cameras.append(formatted_camera)
         
