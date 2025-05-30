@@ -403,7 +403,7 @@ class BlenderCameraCapture(ControlNode):
                 return
 
             # Create ImageUrlArtifact and set output
-            image_artifact = ImageUrlArtifact(static_url, name=f"blender_capture_{camera_name}_{timestamp}")
+            image_artifact = ImageUrlArtifact(value=static_url, name=f"blender_capture_{camera_name}_{timestamp}")
             self.parameter_output_values["image_output"] = image_artifact
 
             # Update status with success info
